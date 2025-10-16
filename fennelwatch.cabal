@@ -5,7 +5,20 @@ version: 0
 
 executable fennelwatch
   build-depends:
+    ansi-terminal,
     base,
-    fsnotify
+    fsnotify,
+    ki,
+    process,
+    stm,
+    temporary,
+    text,
+  default-extensions:
+    BlockArguments
+    OverloadedRecordDot
+    OverloadedStrings
+    PatternSynonyms
+    ViewPatterns
   default-language: GHC2024
+  ghc-options: -threaded -with-rtsopts=-N2 -Wall
   main-is: Main.hs
