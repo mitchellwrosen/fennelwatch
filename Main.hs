@@ -4,8 +4,9 @@ import Control.Concurrent.STM (STM, TChan, atomically, check, retry)
 import Control.Concurrent.STM.TChan (newTChanIO, readTChan, writeTChan)
 import Control.Concurrent.STM.TVar (readTVar)
 import Control.Exception (bracket_)
-import Control.Monad (join)
-import Data.Foldable (asum, fold, for_)
+import Control.Monad (forever, join, when)
+import Data.Char qualified as Char
+import Data.Foldable (asum, fold)
 import Data.Maybe (fromJust)
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -13,10 +14,11 @@ import Data.Text.IO.Utf8 qualified as Text
 import GHC.Conc (registerDelay)
 import Ki qualified
 import System.Console.ANSI qualified as Ansi
+import System.Directory qualified as Directory
 import System.Exit (ExitCode (..))
 import System.FSNotify qualified as Notify
 import System.IO qualified as IO
-import System.IO.Temp qualified as Temporary
+import System.IO.Unsafe (unsafePerformIO)
 import System.Process qualified as Process
 
 main :: IO ()
@@ -30,60 +32,66 @@ main = do
     _stopListening <- Notify.watchTree manager "." (\_ -> True) (atomically . writeTChan eventChan)
     bracket_ Ansi.hideCursor Ansi.showCursor do
       bracket_ (IO.hSetEcho IO.stdout False) (IO.hSetEcho IO.stdout True) do
-        Temporary.withSystemTempFile "fennelwatch" \tempPath tempHandle -> do
-          Ki.scoped \scope -> do
-            Ki.fork_ scope do
-              Ansi.clearScreen
-              Ansi.setCursorPosition 0 0
-              let loop maybeLatestOutput = do
-                    path <- watch eventChan
-                    contents <- Text.readFile path
-                    IO.hSeek tempHandle IO.AbsoluteSeek 0
-                    Text.hPutStr tempHandle contents
-                    IO.hFlush tempHandle
-                    Process.withCreateProcess
-                      (Process.proc "fennel" ["--compile", tempPath])
-                        { Process.std_err = Process.CreatePipe,
-                          Process.std_out = Process.CreatePipe
-                        }
-                      \_stdin stdoutHandle stderrHandle processHandle ->
-                        Process.waitForProcess processHandle >>= \case
-                          ExitSuccess -> do
-                            stdout <- Text.hGetContents (fromJust stdoutHandle)
-                            let output =
-                                  fold
-                                    [ Text.pack (Ansi.setSGRCode [Ansi.SetConsoleIntensity Ansi.BoldIntensity]),
-                                      contents,
-                                      Text.pack (Ansi.setSGRCode [Ansi.Reset]),
-                                      "\n==>\n\n",
-                                      Text.pack (Ansi.setSGRCode [Ansi.SetConsoleIntensity Ansi.BoldIntensity]),
-                                      stdout,
-                                      Text.pack (Ansi.setSGRCode [Ansi.Reset])
-                                    ]
-                            Ansi.clearScreen
-                            Ansi.setCursorPosition 0 0
-                            Text.putStrLn output
-                            loop (Just output)
-                          ExitFailure _ -> do
-                            stderr <- Text.hGetContents (fromJust stderrHandle)
-                            Ansi.clearScreen
-                            Ansi.setCursorPosition 0 0
-                            for_ maybeLatestOutput \latestOutput ->
-                              Text.putStr (latestOutput <> "\n---\n\n")
-                            let errput =
-                                  fold
-                                    [ contents,
-                                      "\n==>\n\n",
-                                      prettifyFennelError stderr
-                                    ]
-                            Text.putStrLn errput
-                            loop maybeLatestOutput
-              loop Nothing
-            _ <- getChar
-            pure ()
+        Ki.scoped \scope -> do
+          Ki.fork_ scope do
+            Ansi.clearScreen
+            Ansi.setCursorPosition 0 0
+            forever do
+              path <- watch eventChan
+              lua <- Text.readFile path
+              if Text.all Char.isSpace lua
+                then Ansi.clearScreen
+                else
+                  fennelCompile lua >>= \case
+                    Right fennel -> do
+                      let output =
+                            fold
+                              [ Text.pack (Ansi.setSGRCode [Ansi.SetConsoleIntensity Ansi.BoldIntensity]),
+                                lua,
+                                Text.pack (Ansi.setSGRCode [Ansi.Reset]),
+                                "\n==>\n\n",
+                                Text.pack (Ansi.setSGRCode [Ansi.SetConsoleIntensity Ansi.BoldIntensity]),
+                                fennel,
+                                Text.pack (Ansi.setSGRCode [Ansi.Reset])
+                              ]
+                      Ansi.clearScreen
+                      Ansi.setCursorPosition 0 0
+                      Text.putStrLn output
+                    Left err -> do
+                      Ansi.clearScreen
+                      Ansi.setCursorPosition 0 0
+                      let errput =
+                            fold
+                              [ lua,
+                                "\n==>\n\n",
+                                prettifyFennelError err
+                              ]
+                      Text.putStrLn errput
+          _ <- getChar
+          pure ()
 
 pattern FennelChanged :: FilePath -> Notify.Event
 pattern FennelChanged path <- (asFennelChanged -> Just path)
+
+temporaryDirectory :: FilePath
+temporaryDirectory =
+  unsafePerformIO Directory.getTemporaryDirectory
+{-# NOINLINE temporaryDirectory #-}
+
+fennelCompile :: Text -> IO (Either Text Text)
+fennelCompile lua = do
+  (path, handle) <- IO.openBinaryTempFile temporaryDirectory "fennelwatch"
+  Text.hPutStr handle lua
+  IO.hFlush handle
+  Process.withCreateProcess
+    (Process.proc "fennel" ["--compile", path])
+      { Process.std_err = Process.CreatePipe,
+        Process.std_out = Process.CreatePipe
+      }
+    \_stdin stdoutHandle stderrHandle processHandle ->
+      Process.waitForProcess processHandle >>= \case
+        ExitSuccess -> Right <$> Text.hGetContents (fromJust stdoutHandle)
+        ExitFailure _ -> Left <$> Text.hGetContents (fromJust stderrHandle)
 
 watch :: TChan Notify.Event -> IO FilePath
 watch eventChan =

@@ -7,11 +7,11 @@ executable fennelwatch
   build-depends:
     ansi-terminal,
     base,
+    directory,
     fsnotify,
     ki,
     process,
     stm,
-    temporary,
     text,
   default-extensions:
     BlockArguments
